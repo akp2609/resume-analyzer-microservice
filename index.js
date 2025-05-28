@@ -7,19 +7,20 @@ import mongoose from "mongoose";
 import dotenv from 'dotenv';
 import path from "path";
 
-
-
 dotenv.config({ path: '/etc/secrets/resume-analyser-env' });
 
 const app = express();
-
 const PORT = process.env.PORT || 8080;
 app.use(bodyParser.json());
+
+console.log("🔐 Loading environment variables...");
+console.log("🔧 Connecting to services...");
 
 const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY
 });
 
+console.log("📄 Setting up Document AI processor...");
 const nameProcessor = `projects/${process.env.GOOGLE_PROJECT_ID}/locations/${process.env.GOOGLE_REGION_LOCATION}/processors/${process.env.GOOGLE_RESUME_PARSER_PROCESSOR_ID}`;
 
 const storage = new Storage();
@@ -32,71 +33,83 @@ const ResumeVector = mongoose.model("resumes", new mongoose.Schema({
 }));
 
 app.post("/", async (req, res) => {
+    console.log("📩 Received a new Pub/Sub message.");
+
     try {
         const pubsubMessage = req.body.message;
+        if (!pubsubMessage?.data) {
+            console.error("❌ Missing 'data' field in Pub/Sub message.");
+            return res.status(400).send("Invalid Pub/Sub message format.");
+        }
+
         const dataBuffer = Buffer.from(pubsubMessage.data, "base64");
+        console.log("📦 Decoded message:", dataBuffer.toString());
+
         const { bucket, name } = JSON.parse(dataBuffer.toString());
+        console.log(`🗃️ File path extracted: bucket = ${bucket}, name = ${name}`);
 
         const file = storage.bucket(bucket).file(name);
         const contents = (await file.download())[0];
+        console.log("📄 File downloaded from Cloud Storage");
 
         let result;
-        try{
-        [result] = await documentaiClient.processDocument({
-            name: nameProcessor,
-            rawDocument: {
-                content: contents.toString("base64"),
-                mimeType: "application/pdf",
-            },
-        });}
-        catch (docErr) {
+        try {
+            [result] = await documentaiClient.processDocument({
+                name: nameProcessor,
+                rawDocument: {
+                    content: contents.toString("base64"),
+                    mimeType: "application/pdf",
+                },
+            });
+        } catch (docErr) {
             console.error("❌ Error processing document with Document AI:", docErr.message || docErr);
             return res.status(200).send("Document processing failed, message discarded.");
         }
-    
 
+        const text = result.document?.text || "";
+        const chunks = text.match(/.{1,1000}/g) || [];
+        console.log(`🧩 Document split into ${chunks.length} chunks`);
 
-    const text = result.document?.text || "";
-    const chunks = text.match(/.{1,1000}/g) || [];
+        const embeddings = await Promise.all(
+            chunks.map(chunk =>
+                openai.embeddings.create({
+                    model: "text-embedding-3-small",
+                    input: chunk
+                }).then(res => {
+                    console.log("✅ Embedding created for chunk");
+                    return res.data[0].embedding;
+                }).catch(err => {
+                    console.error("❌ Failed to get embedding:", err.message);
+                    return []; // Skip or handle fallback
+                })
+            )
+        );
 
-    const embeddings = await Promise.all(
-        chunks.map(chunk => openai.embeddings.create({
-            model: "text-embedding-3-small",
-            input: chunk
-        }).then(res => res.data[0].embedding))
-    );
+        const userId = name.split("/")[1];
+        console.log("📦 Inserting document into MongoDB:", { userId });
 
-    console.log("📦 Inserting document:", {
-        userId: name.split("/")[1],
-        textChunks: chunks,
-        embeddings: embeddings
-    });
+        try {
+            await ResumeVector.create({
+                userId,
+                textChunks: chunks,
+                embeddings
+            });
+            console.log("✅ Data inserted into MongoDB");
+        } catch (insertErr) {
+            console.error("❌ Error inserting into MongoDB:", insertErr.message || insertErr);
+        }
 
-    try {
-        await ResumeVector.create({
-            userId: name.split("/")[1],
-            textChunks: chunks,
-            embeddings: embeddings
-        });
-        console.log("✅ Data inserted into MongoDB");
-    } catch (insertErr) {
-        console.error("❌ Error inserting into MongoDB:", insertErr);
+        res.status(200).send("Processed");
+    } catch (err) {
+        console.error("💥 Unhandled error in POST handler:", err.message || err);
+        res.status(500).send("Error processing resume");
     }
-
-    res.status(200).send("Processed");
-} catch (err) {
-    console.error(err);
-    res.status(500).send("Error processing resume");
-}
 });
-
 
 async function startServer() {
     try {
-        await mongoose.connect(process.env.MONGO_URI, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true,
-        });
+        console.log("🔌 Connecting to MongoDB...");
+        await mongoose.connect(process.env.MONGO_URI);
         console.log("✅ Connected to MongoDB");
 
         app.listen(PORT, () => console.log(`🚀 Listening on port ${PORT}`));
@@ -105,6 +118,5 @@ async function startServer() {
         process.exit(1);
     }
 }
-
 
 startServer();
