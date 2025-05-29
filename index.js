@@ -97,7 +97,7 @@ app.post("/", async (req, res) => {
                         return res.data[0].embedding;
                     }).catch(err => {
                         console.error("❌ Failed to get embedding:", err.message);
-                        return []; // Skip or handle fallback
+                        return [];
                     })
                 )
             );
@@ -110,7 +110,7 @@ app.post("/", async (req, res) => {
                     userId,
                     textChunks: chunks,
                     embeddings
-                }, 10000); // 10 seconds timeout
+                }, 50000); // 10 seconds timeout
                 console.log("✅ Data inserted into MongoDB");
             } catch (err) {
                 console.error("❌ Mongo insert failed or timed out:", err.message);
