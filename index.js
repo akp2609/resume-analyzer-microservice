@@ -42,76 +42,85 @@ const insertWithTimeout = (doc, timeoutMs) => {
 app.post("/", async (req, res) => {
     console.log("📩 Received a new Pub/Sub message.");
 
+    let pubsubMessage;
     try {
-        const pubsubMessage = req.body.message;
+        pubsubMessage = req.body.message;
         if (!pubsubMessage?.data) {
             console.error("❌ Missing 'data' field in Pub/Sub message.");
-            return res.status(400).send("Invalid Pub/Sub message format.");
+            return res.status(200).send("Invalid Pub/Sub message format.");
         }
-
-        const dataBuffer = Buffer.from(pubsubMessage.data, "base64");
-        console.log("📦 Decoded message:", dataBuffer.toString());
-
-        const { bucket, name } = JSON.parse(dataBuffer.toString());
-        console.log(`🗃️ File path extracted: bucket = ${bucket}, name = ${name}`);
-
-        const file = storage.bucket(bucket).file(name);
-        const contents = (await file.download())[0];
-        console.log("📄 File downloaded from Cloud Storage");
-
-        let result;
-        try {
-            [result] = await documentaiClient.processDocument({
-                name: nameProcessor,
-                rawDocument: {
-                    content: contents.toString("base64"),
-                    mimeType: "application/pdf",
-                },
-            });
-        } catch (docErr) {
-            console.error("❌ Error processing document with Document AI:", docErr.message || docErr);
-            return res.status(200).send("Document processing failed, message discarded.");
-        }
-
-        const text = result.document?.text || "";
-        const chunks = text.match(/.{1,1000}/g) || [];
-        console.log(`🧩 Document split into ${chunks.length} chunks`);
-
-        const embeddings = await Promise.all(
-            chunks.map(chunk =>
-                openai.embeddings.create({
-                    model: "text-embedding-3-small",
-                    input: chunk
-                }).then(res => {
-                    console.log("✅ Embedding created for chunk");
-                    return res.data[0].embedding;
-                }).catch(err => {
-                    console.error("❌ Failed to get embedding:", err.message);
-                    return []; // Skip or handle fallback
-                })
-            )
-        );
-
-        const userId = name.split("/")[1];
-        console.log("📦 Inserting document into MongoDB:", { userId });
-
-        try {
-            await insertWithTimeout({
-                userId,
-                textChunks: chunks,
-                embeddings
-            }, 10000); // 10 seconds timeout
-            console.log("✅ Data inserted into MongoDB");
-        } catch (err) {
-            console.error("❌ Mongo insert failed or timed out:", err.message);
-            // Optionally store in fallback storage (e.g., Firestore or log to Cloud Logging)
-        }
-
-        res.status(200).send("Processed");
-    } catch (err) {
-        console.error("💥 Unhandled error in POST handler:", err.message || err);
-        res.status(500).send("Error processing resume");
+    } catch (e) {
+        return res.status(200).send("Malformed Pub/Sub message");
     }
+
+    // ✅ Immediately ACK Pub/Sub to prevent retries
+    res.status(200).send("Received");
+
+    // 🔁 Run resume analysis in background
+    (async () => {
+        try {
+            const dataBuffer = Buffer.from(pubsubMessage.data, "base64");
+            console.log("📦 Decoded message:", dataBuffer.toString());
+
+            const { bucket, name } = JSON.parse(dataBuffer.toString());
+            console.log(`🗃️ File path extracted: bucket = ${bucket}, name = ${name}`);
+
+            const file = storage.bucket(bucket).file(name);
+            const contents = (await file.download())[0];
+            console.log("📄 File downloaded from Cloud Storage");
+
+            let result;
+            try {
+                [result] = await documentaiClient.processDocument({
+                    name: nameProcessor,
+                    rawDocument: {
+                        content: contents.toString("base64"),
+                        mimeType: "application/pdf",
+                    },
+                });
+            } catch (docErr) {
+                console.error("❌ Error processing document with Document AI:", docErr.message || docErr);
+                return;
+            }
+
+            const text = result.document?.text || "";
+            const chunks = text.match(/.{1,1000}/g) || [];
+            console.log(`🧩 Document split into ${chunks.length} chunks`);
+
+            const embeddings = await Promise.all(
+                chunks.map(chunk =>
+                    openai.embeddings.create({
+                        model: "text-embedding-3-small",
+                        input: chunk
+                    }).then(res => {
+                        console.log("✅ Embedding created for chunk");
+                        return res.data[0].embedding;
+                    }).catch(err => {
+                        console.error("❌ Failed to get embedding:", err.message);
+                        return []; // Skip or handle fallback
+                    })
+                )
+            );
+
+            const userId = name.split("/")[1];
+            console.log("📦 Inserting document into MongoDB:", { userId });
+
+            try {
+                await insertWithTimeout({
+                    userId,
+                    textChunks: chunks,
+                    embeddings
+                }, 10000); // 10 seconds timeout
+                console.log("✅ Data inserted into MongoDB");
+            } catch (err) {
+                console.error("❌ Mongo insert failed or timed out:", err.message);
+                // Optionally log somewhere or retry in batch later
+            }
+
+        } catch (err) {
+            console.error("💥 Unhandled error in background resume processing:", err.message || err);
+        }
+    })();
 });
 
 async function startServer() {
