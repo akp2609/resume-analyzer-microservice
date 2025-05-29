@@ -100,6 +100,8 @@ app.post("/", async (req, res) => {
             console.log("📦 Inserting document into MongoDB:", { userId });
 
             try {
+                await ResumeVector.deleteMany({userId});
+
                 await ResumeVector.create({
                     userId,
                     textChunks: chunks,
