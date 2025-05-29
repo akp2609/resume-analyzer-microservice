@@ -32,12 +32,6 @@ const ResumeVector = mongoose.model("resumes", new mongoose.Schema({
     embeddings: [[Number]],
 }));
 
-const insertWithTimeout = (doc, timeoutMs) => {
-    return Promise.race([
-        ResumeVector.create(doc),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("Insert timeout")), timeoutMs))
-    ]);
-};
 
 app.post("/", async (req, res) => {
     console.log("📩 Received a new Pub/Sub message.");
@@ -53,10 +47,10 @@ app.post("/", async (req, res) => {
         return res.status(200).send("Malformed Pub/Sub message");
     }
 
-    // ✅ Immediately ACK Pub/Sub to prevent retries
+    
     res.status(200).send("Received");
 
-    // 🔁 Run resume analysis in background
+    
     (async () => {
         try {
             const dataBuffer = Buffer.from(pubsubMessage.data, "base64");
@@ -106,15 +100,14 @@ app.post("/", async (req, res) => {
             console.log("📦 Inserting document into MongoDB:", { userId });
 
             try {
-                await insertWithTimeout({
+                await ResumeVector.create({
                     userId,
                     textChunks: chunks,
                     embeddings
-                }, 50000); // 10 seconds timeout
+                }); 
                 console.log("✅ Data inserted into MongoDB");
             } catch (err) {
                 console.error("❌ Mongo insert failed or timed out:", err.message);
-                // Optionally log somewhere or retry in batch later
             }
 
         } catch (err) {
