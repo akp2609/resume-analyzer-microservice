@@ -96,7 +96,7 @@ app.post("/", async (req, res) => {
                 )
             );
 
-            const userId = name.split("/")[1];
+            const userId = name.split("/")[0];
             console.log("📦 Inserting document into MongoDB:", { userId });
 
             try {
