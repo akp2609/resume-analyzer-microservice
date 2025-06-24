@@ -47,10 +47,10 @@ app.post("/", async (req, res) => {
         return res.status(200).send("Malformed Pub/Sub message");
     }
 
-    
+
     res.status(200).send("Received");
 
-    
+
     (async () => {
         try {
             const dataBuffer = Buffer.from(pubsubMessage.data, "base64");
@@ -82,32 +82,54 @@ app.post("/", async (req, res) => {
             console.log(`🧩 Document split into ${chunks.length} chunks`);
 
             const embeddings = await Promise.all(
-                chunks.map(chunk =>
-                    openai.embeddings.create({
-                        model: "text-embedding-3-small",
-                        input: chunk
-                    }).then(res => {
-                        console.log("✅ Embedding created for chunk");
-                        return res.data[0].embedding;
-                    }).catch(err => {
-                        console.error("❌ Failed to get embedding:", err.message);
+                chunks.map(async (chunk, i) => {
+                    try {
+                        const res = await openai.embeddings.create({
+                            model: "text-embedding-3-small",
+                            input: chunk
+                        });
+
+                        const vector = res.data?.[0]?.embedding;
+
+                        // Fallback: Check for non-finite or missing values
+                        if (!Array.isArray(vector) || !vector.every(Number.isFinite)) {
+                            console.warn(`⚠️ Chunk ${i} embedding is invalid, inserting empty array`);
+                            return [];
+                        }
+
+                        console.log(`✅ Chunk ${i} embedded successfully`);
+                        return vector;
+                    } catch (err) {
+                        console.error(`❌ Embedding error for chunk ${i}:`, err.message);
                         return [];
-                    })
-                )
+                    }
+                })
             );
+
+            const validEmbeddings = embeddings.filter(
+                (vec) => Array.isArray(vec) && vec.length > 0 && vec.every(Number.isFinite)
+            );
+
+            if (validEmbeddings.length === 0) {
+                console.warn("⚠️ No valid embeddings found. Skipping Mongo insert.");
+                return;
+            }
+
+
 
             const userId = name.split("/")[0];
             console.log("📦 Inserting document into MongoDB:", { userId });
 
             try {
-                await ResumeVector.deleteMany({userId});
+                await ResumeVector.deleteMany({ userId });
 
                 await ResumeVector.create({
                     userId,
                     textChunks: chunks,
-                    embeddings
-                }); 
-                console.log("✅ Data inserted into MongoDB");
+                    embeddings: validEmbeddings
+                });
+                console.log("✅ Valid data inserted into MongoDB");
+
             } catch (err) {
                 console.error("❌ Mongo insert failed or timed out:", err.message);
             }
