@@ -60,6 +60,17 @@ app.post("/", async (req, res) => {
             console.log(`🗃️ File path extracted: bucket = ${bucket}, name = ${name}`);
 
             const file = storage.bucket(bucket).file(name);
+            
+            const [metadata] = await file.getMetadata();
+            const isPremium = metadata.metadata?.premium === 'true';
+
+            console.log("💰 Premium metadata found:", isPremium);
+
+            
+            if (!isPremium) {
+                console.log("❌ Skipping resume processing — not a premium user.");
+                return;
+            }
             const contents = (await file.download())[0];
             console.log("📄 File downloaded from Cloud Storage");
 
@@ -91,7 +102,7 @@ app.post("/", async (req, res) => {
 
                         const vector = res.data?.[0]?.embedding;
 
-                        // Fallback: Check for non-finite or missing values
+
                         if (!Array.isArray(vector) || !vector.every(Number.isFinite)) {
                             console.warn(`⚠️ Chunk ${i} embedding is invalid, inserting empty array`);
                             return [];
